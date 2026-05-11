@@ -1,0 +1,19 @@
+# Environment & secrets
+.env
+*.key
+
+# Compiled CUDA
+cuda/*.so
+cuda/*.dylib
+cuda/*.o
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,15 @@
+[Unit]
+Description=HASH256 GPU Miner
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/hash256-miner
+EnvironmentFile=/root/hash256-miner/.env
+ExecStart=/usr/bin/python3 /root/hash256-miner/miner.py
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
