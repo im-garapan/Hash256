@@ -162,10 +162,9 @@ int get_gpu_info(char* info_out, int max_len) {
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, 0);
     snprintf(info_out, max_len,
-        "GPU: %s | Compute: %d.%d | SMs: %d | Clock: %d MHz | Memory: %lu MB",
+        "GPU: %s | Compute: %d.%d | SMs: %d | Memory: %lu MB",
         prop.name, prop.major, prop.minor,
         prop.multiProcessorCount,
-        prop.clockRate / 1000,
         prop.totalGlobalMem / (1024 * 1024)
     );
     return device_count;
