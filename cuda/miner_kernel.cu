@@ -108,7 +108,11 @@ int mine_batch(
 
     if (threads_per_block <= 0) threads_per_block = 256;
     uint64_t num_blocks = (batch_size + threads_per_block - 1) / threads_per_block;
-    if (num_blocks > 65535) num_blocks = 65535;
+
+    // RTX 3090: 82 SMs, max 2048 threads/SM = 167,936 concurrent threads
+    // Use grid-stride loop for large batches - no cap needed
+    // CUDA max gridDim.x = 2^31-1, but use uint32 max for safety
+    if (num_blocks > 2147483647ULL) num_blocks = 2147483647ULL;
 
     mine_kernel<<<(unsigned int)num_blocks, threads_per_block>>>(
         d_challenge, d_target, start_nonce, d_result

@@ -259,8 +259,8 @@ def main():
                         help="Ethereum RPC URL")
     parser.add_argument("--batch-size", "-b", type=int, default=33554432,
                         help="Nonces per GPU batch (default: 32M for RTX 3090)")
-    parser.add_argument("--threads", "-t", type=int, default=256,
-                        help="CUDA threads per block")
+    parser.add_argument("--threads", "-t", type=int, default=512,
+                        help="CUDA threads per block (default: 512 for max occupancy)")
     parser.add_argument("--gas-price", type=float, default=None,
                         help="Gas price in gwei (default: auto)")
     parser.add_argument("--gas-limit", type=int, default=300000,
