@@ -68,7 +68,31 @@ __global__ void mine_kernel(
     }
 }
 
+// Persistent GPU memory (allocated once, reused every batch)
+static uint8_t *d_challenge = NULL;
+static uint8_t *d_target = NULL;
+static MiningResult *d_result = NULL;
+static int gpu_initialized = 0;
+
 extern "C" {
+
+void gpu_init() {
+    if (!gpu_initialized) {
+        cudaMalloc(&d_challenge, 32);
+        cudaMalloc(&d_target, 32);
+        cudaMalloc(&d_result, sizeof(MiningResult));
+        gpu_initialized = 1;
+    }
+}
+
+void gpu_cleanup() {
+    if (gpu_initialized) {
+        cudaFree(d_challenge);
+        cudaFree(d_target);
+        cudaFree(d_result);
+        gpu_initialized = 0;
+    }
+}
 
 int mine_batch(
     const char* challenge_hex,
@@ -79,6 +103,9 @@ int mine_batch(
     char* nonce_out,
     char* hash_out
 ) {
+    // Auto-init on first call
+    if (!gpu_initialized) gpu_init();
+
     uint8_t h_challenge[32];
     uint8_t h_target[32];
 
@@ -93,14 +120,8 @@ int mine_batch(
         h_target[i] = (uint8_t)byte_val;
     }
 
-    uint8_t *d_challenge, *d_target;
-    MiningResult *d_result;
     MiningResult h_result;
     memset(&h_result, 0, sizeof(MiningResult));
-
-    cudaMalloc(&d_challenge, 32);
-    cudaMalloc(&d_target, 32);
-    cudaMalloc(&d_result, sizeof(MiningResult));
 
     cudaMemcpy(d_challenge, h_challenge, 32, cudaMemcpyHostToDevice);
     cudaMemcpy(d_target, h_target, 32, cudaMemcpyHostToDevice);
@@ -108,10 +129,6 @@ int mine_batch(
 
     if (threads_per_block <= 0) threads_per_block = 256;
     uint64_t num_blocks = (batch_size + threads_per_block - 1) / threads_per_block;
-
-    // RTX 3090: 82 SMs, max 2048 threads/SM = 167,936 concurrent threads
-    // Use grid-stride loop for large batches - no cap needed
-    // CUDA max gridDim.x = 2^31-1, but use uint32 max for safety
     if (num_blocks > 2147483647ULL) num_blocks = 2147483647ULL;
 
     mine_kernel<<<(unsigned int)num_blocks, threads_per_block>>>(
@@ -120,10 +137,6 @@ int mine_batch(
     cudaDeviceSynchronize();
 
     cudaMemcpy(&h_result, d_result, sizeof(MiningResult), cudaMemcpyDeviceToHost);
-
-    cudaFree(d_challenge);
-    cudaFree(d_target);
-    cudaFree(d_result);
 
     if (h_result.found) {
         for (int i = 0; i < 32; i++) {
