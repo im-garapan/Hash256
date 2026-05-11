@@ -257,10 +257,10 @@ def main():
     parser.add_argument("--rpc", "-r",
                         default=os.getenv("RPC_URL", "https://eth.llamarpc.com"),
                         help="Ethereum RPC URL")
-    parser.add_argument("--batch-size", "-b", type=int, default=33554432,
-                        help="Nonces per GPU batch (default: 32M for RTX 3090)")
-    parser.add_argument("--threads", "-t", type=int, default=512,
-                        help="CUDA threads per block (default: 512 for max occupancy)")
+    parser.add_argument("--batch-size", "-b", type=int, default=134217728,
+                        help="Nonces per GPU batch (default: 128M for RTX 3090 full power)")
+    parser.add_argument("--threads", "-t", type=int, default=1024,
+                        help="CUDA threads per block (default: 1024 for max SM occupancy)")
     parser.add_argument("--gas-price", type=float, default=None,
                         help="Gas price in gwei (default: auto)")
     parser.add_argument("--gas-limit", type=int, default=300000,
@@ -281,7 +281,7 @@ def main():
 
     print("""
     ╔══════════════════════════════════════════════════╗
-    ║        HASH256 GPU MINER v2.1.0                 ║
+    ║        HASH256 GPU MINER v3.0.0 (FULL POWER)    ║
     ║        Contract: 0xAC7b...A0cc                  ║
     ║        https://hash256.org                      ║
     ╚══════════════════════════════════════════════════╝
