@@ -1,6 +1,9 @@
 # HASH256 GPU Miner
 
-GPU-accelerated CLI miner for [HASH token](https://hash256.org) on Ethereum Mainnet using NVIDIA CUDA.
+GPU-accelerated CLI miner for [HASH token](https://hash256.org) on Ethereum
+Mainnet. Written in CUDA (keccak-256 brute force) + Python (RPC + tx
+submission). Works on any NVIDIA GPU from Pascal (sm_61) through Blackwell
+(sm_120). Auto-tunes batch size per GPU. Optional Telegram notifications.
 
 **Contract:** [`0xAC7b5d06fa1e77D08aea40d46cB7C5923A87A0cc`](https://etherscan.io/token/0xac7b5d06fa1e77d08aea40d46cb7c5923a87a0cc)
 
@@ -9,210 +12,210 @@ GPU-accelerated CLI miner for [HASH token](https://hash256.org) on Ethereum Main
 ## How It Works
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  1. Get challenge   →  contract.getChallenge(wallet)        │
-│  2. Get difficulty  →  contract.currentDifficulty()         │
-│  3. GPU brute-force →  find nonce where                     │
-│                         keccak256(challenge || nonce) < diff │
-│  4. Submit solution →  contract.mine(nonce)                 │
-│  5. Earn 100 HASH  →  repeat!                              │
-└─────────────────────────────────────────────────────────────┘
+1. challenge  = contract.getChallenge(walletAddress)
+2. difficulty = contract.currentDifficulty()
+3. GPU brute-forces a nonce where:
+       keccak256(challenge || nonce) < difficulty
+4. Submit:    contract.mine(nonce)
+5. Earn HASH (100 HASH/mint at Era 0). Repeat.
 ```
+
+Each miner gets its own challenge from the contract, so you do not compete
+on the *same* nonce search space — but you still race other miners to be
+the first to land a `mine()` tx in the next block.
 
 ---
 
 ## Requirements
 
-- **VPS/Server** with NVIDIA GPU (RTX 3060+ recommended)
-- **Ubuntu 20.04/22.04/24.04** (tested)
-- **NVIDIA Driver** + **CUDA Toolkit** 11.0+
-- **Python 3.9+**
-- **ETH in wallet** for gas fees (~$1-5 per mint)
+| | |
+|---|---|
+| OS         | Ubuntu 20.04 / 22.04 / 24.04 (or Debian 11+) |
+| GPU        | NVIDIA, compute cap ≥ 6.1 (GTX 10xx and newer) |
+| RAM        | 1 GB free |
+| Disk       | ~5 GB (CUDA toolkit is the bulk) |
+| Wallet     | Funded with ETH for gas (~$1-5 per mint) |
+
+CPU-only mode exists but is **only useful for testing**. It is roughly
+10,000× slower than a mid-range GPU and has no realistic chance of winning
+a block in competitive mining.
 
 ---
 
-## Step-by-Step Setup (Fresh VPS)
+## Install — Recommended (one command)
 
-### Quick install (one command, fully interactive)
-
-If you just want everything set up end-to-end on a fresh Ubuntu/Debian VPS:
+On a fresh Ubuntu/Debian VPS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mrfunntastiic/artifacts/main/hash256-miner/setup.sh -o setup.sh
+git clone https://github.com/im-garapan/Hash256.git ~/hash256-miner
+cd ~/hash256-miner
 bash setup.sh
 ```
 
-`setup.sh` handles **all 12 steps** below in one go (driver, CUDA, Python venv,
-build, .env, optional Telegram test, optional systemd) and shows a clear
-error message indicating exactly which step failed and why if anything
-goes wrong. Pass `--yes` for non-interactive defaults, `--skip-driver` /
-`--skip-cuda` if those are already installed, or `--no-service` to skip
-the systemd prompt. Full log is written to `setup.log`.
+`setup.sh` is a self-contained installer that handles everything in one
+shot:
 
-If you prefer to do it manually, follow the steps below.
+| Step | What it does |
+|------|--------------|
+| 0    | Pre-flight (OS, sudo, internet, disk) |
+| 1    | Pick install dir, mirror logs to `setup.log` |
+| 2    | `build-essential`, git, curl, screen |
+| 3    | NVIDIA driver (via `ubuntu-drivers autoinstall`) |
+| 4    | CUDA toolkit (`nvcc`) |
+| 5    | Python 3 + venv |
+| 6    | Project sources (existing or fresh clone) |
+| 7    | Create `.venv` and install `requirements.txt` |
+| 8    | Build CUDA library with auto-detected `-arch=sm_*` |
+| 9    | Interactive `.env` wizard (PRIVATE_KEY hidden, RPC, Telegram) |
+| 10   | Send a test message to Telegram (optional) |
+| 11   | Install systemd service (optional) |
+| 12   | Health check (deps importable, miner.py loads, .env sane) |
 
-### Step 1: Update System & Install Dependencies
+If anything fails the script prints a banner with the **failed step,
+command, line number, exit code**, the last 25 lines of the log, and
+contextual hints for that step. Full log lives in `setup.log`.
+
+### Useful flags
 
 ```bash
-sudo apt update && sudo apt upgrade -y
-sudo apt install -y build-essential git python3 python3-pip screen
+bash setup.sh --yes              # non-interactive defaults
+bash setup.sh --skip-driver      # NVIDIA driver already installed
+bash setup.sh --skip-cuda        # nvcc already installed
+bash setup.sh --no-service       # do not prompt for systemd
+bash setup.sh --dir /opt/hash256 # custom install directory
+bash setup.sh --arch sm_89       # force a specific CUDA arch
 ```
 
-### Step 2: Install NVIDIA Drivers
+> If `setup.sh` installs the NVIDIA driver from scratch, **reboot first**,
+> then re-run `bash setup.sh --dir <dir>` to continue with the CUDA build.
+
+---
+
+## Install — Manual (if you prefer step-by-step)
+
+<details>
+<summary>Click to expand</summary>
 
 ```bash
+# 1. System packages
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y build-essential git python3 python3-pip python3-venv screen
+
+# 2. NVIDIA driver
 sudo apt install -y ubuntu-drivers-common
 sudo ubuntu-drivers autoinstall
-sudo reboot
-```
+sudo reboot         # then come back
 
-After reboot, verify:
-```bash
-nvidia-smi
-```
-You should see your GPU (e.g. RTX 3090).
-
-### Step 3: Install CUDA Toolkit
-
-```bash
+# 3. CUDA toolkit
 sudo apt install -y nvidia-cuda-toolkit
-```
+nvcc --version       # verify
 
-Verify:
-```bash
-nvcc --version
-```
-
-### Step 4: Clone the Miner
-
-```bash
-git clone --depth 1 -b feat/hash256-gpu-miner https://github.com/mrfunntastiic/artifacts.git /tmp/h256
-cp -r /tmp/h256/hash256-miner ~/hash256-miner
-rm -rf /tmp/h256
+# 4. Project + venv
+git clone https://github.com/im-garapan/Hash256.git ~/hash256-miner
 cd ~/hash256-miner
-```
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 
-### Step 5: Build CUDA Kernel
-
-Choose your GPU architecture:
-
-| GPU | Architecture |
-|-----|-------------|
-| GTX 1060/1070/1080 | `sm_61` |
-| RTX 2060/2070/2080 | `sm_75` |
-| RTX 3060/3070/3080/3090 | `sm_86` |
-| RTX 4060/4070/4080/4090 | `sm_89` |
-
-Build:
-```bash
-cd ~/hash256-miner/cuda
-make ARCH=sm_86
-cd ..
-```
-
-Verify the library was built:
-```bash
+# 5. Build CUDA library (auto-detects arch)
+./build.sh
 ls -la cuda/libhash256miner.so
-```
 
-### Step 6: Install Python Dependencies
-
-```bash
-pip3 install web3 eth-account
-```
-
-### Step 7: Configure
-
-```bash
+# 6. Configure
 cp .env.example .env
-nano .env
+nano .env            # set PRIVATE_KEY (and TELEGRAM_* if you want)
+chmod 600 .env
+
+# 7. Run
+python miner.py
 ```
 
-Fill in:
-```
-PRIVATE_KEY=your_private_key_here_without_0x
+</details>
+
+---
+
+## Configuration (`.env`)
+
+After install, edit `.env` (or rerun `bash setup.sh` and use the wizard):
+
+```ini
+# ── Wallet (required) ─────────────────────────────────────────────
+PRIVATE_KEY=your_private_key_without_0x
 RPC_URL=https://eth.llamarpc.com
 
-# Optional Telegram alerts (start / solution / success / fail / stop)
+# ── Telegram alerts (optional, leave empty to disable) ────────────
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
+
+TELEGRAM_NOTIFY_START=1     # miner started
+TELEGRAM_NOTIFY_SOLUTION=1  # solution found (before submit)
+TELEGRAM_NOTIFY_SUCCESS=1   # tx confirmed (HASH minted)
+TELEGRAM_NOTIFY_FAIL=1      # tx failed / submit error
+TELEGRAM_NOTIFY_STOP=1      # miner stopped
+
+# ── Tuning (optional, CLI flags override) ─────────────────────────
+# BATCH_SIZE=0              # 0 / empty = auto-tune from GPU
+# THREADS_PER_BLOCK=256
+# GAS_PRICE_GWEI=
+# GAS_LIMIT=300000
 ```
 
-> ⚠️ **IMPORTANT:** Your wallet needs ETH for gas fees. Each `mine()` transaction costs ~$1-5 depending on gas prices.
+> Your wallet needs ETH for gas. Each `mine()` tx costs ~$1-5 depending on
+> network conditions. Use a dedicated mining wallet — not your main one.
 
-Save: `Ctrl+O` → `Enter` → `Ctrl+X`
+### Telegram setup
 
-#### Telegram Setup (optional)
+1. Talk to [@BotFather](https://t.me/BotFather) → `/newbot` → copy the
+   token into `TELEGRAM_BOT_TOKEN`.
+2. Send any message to your new bot, then visit
+   `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy the numeric
+   `chat.id` into `TELEGRAM_CHAT_ID`. (Or use [@userinfobot](https://t.me/userinfobot).)
+3. Toggle individual events with the `TELEGRAM_NOTIFY_*` flags (`1`/`0`).
 
-1. Talk to [@BotFather](https://t.me/BotFather), create a bot, copy the token.
-2. Talk to [@userinfobot](https://t.me/userinfobot) (or send `/start` to your bot then check `https://api.telegram.org/bot<TOKEN>/getUpdates`) to get your chat id.
-3. Put both into `.env` as `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
-4. Toggle individual events with `TELEGRAM_NOTIFY_*` flags (`1`/`0`).
+You'll receive messages like:
 
-Leave the token empty to disable notifications entirely.
-
-### Step 8: Test Run
-
-```bash
-cd ~/hash256-miner
-python3 miner.py --batch-size 33554432
 ```
-
-You should see:
-```
-  [GPU] GPU: NVIDIA GeForce RTX 3090 | Compute: 8.6 | SMs: 82 | ...
-  [RPC] Connected | Chain: 1 | Block: ...
-  [WALLET] 0xYourAddress...
-  Genesis: Complete
-  Reward: 100.0000 HASH/mint
-  [START] Mining started!
-  [HASH] Batch #0 | 3500.0 MH/s ...
-```
-
-### Step 9: Run in Background (Recommended)
-
-So mining continues even when you disconnect SSH:
-
-```bash
-screen -dmS miner bash -c 'cd ~/hash256-miner && python3 miner.py --batch-size 33554432'
-```
-
-Check mining status:
-```bash
-screen -r miner
-```
-
-Detach without stopping: `Ctrl+A` then `D`
-
-### Step 10 (Optional): Auto-Start on Reboot
-
-```bash
-sudo cp ~/hash256-miner/hash256-miner.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now hash256-miner
-```
-
-Check logs:
-```bash
-sudo journalctl -fu hash256-miner
+🚀 HASH256 miner started
+💎 Solution found! (nonce, hash, submitting...)
+✅ HASH minted! (tx hash, block, gas used)
+🛑 Miner stopped (session stats)
 ```
 
 ---
 
-## Quick One-Liner (if drivers already installed)
+## Run the Miner
+
+### Foreground (terminal stays open)
 
 ```bash
-git clone --depth 1 -b feat/hash256-gpu-miner https://github.com/mrfunntastiic/artifacts.git /tmp/h256 && \
-cp -r /tmp/h256/hash256-miner ~/hash256-miner && rm -rf /tmp/h256 && \
-cd ~/hash256-miner/cuda && make ARCH=sm_86 && cd .. && \
-pip3 install web3 eth-account && \
-cp .env.example .env && nano .env
+cd ~/hash256-miner
+source .venv/bin/activate
+python miner.py
 ```
 
-Then run:
+### Background with `screen` (survives SSH disconnect)
+
 ```bash
-cd ~/hash256-miner && screen -dmS miner python3 miner.py --batch-size 33554432
+screen -dmS miner bash -c 'cd ~/hash256-miner && source .venv/bin/activate && python miner.py'
+screen -r miner            # attach
+# Ctrl+A then D             to detach without stopping
 ```
+
+### Background with `systemd` (auto-start on reboot)
+
+If you said yes during `setup.sh`, the service is already installed.
+Otherwise:
+
+```bash
+sudo cp hash256-miner.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now hash256-miner
+sudo journalctl -fu hash256-miner   # follow logs
+```
+
+> Edit the service file beforehand if you want a non-root user or a
+> different working directory. `setup.sh` writes a service that uses your
+> current user and the venv automatically.
 
 ---
 
@@ -220,99 +223,117 @@ cd ~/hash256-miner && screen -dmS miner python3 miner.py --batch-size 33554432
 
 | Flag | Env Variable | Default | Description |
 |------|-------------|---------|-------------|
-| `--private-key`, `-k` | `PRIVATE_KEY` | - | Your private key (required) |
+| `--private-key`, `-k` | `PRIVATE_KEY` | - | Private key (required) |
 | `--rpc`, `-r` | `RPC_URL` | `https://eth.llamarpc.com` | Ethereum RPC endpoint |
-| `--batch-size`, `-b` | `BATCH_SIZE` | auto | Nonces per GPU batch (auto-tuned per GPU) |
+| `--batch-size`, `-b` | `BATCH_SIZE` | auto | Nonces per GPU launch (auto-tuned) |
 | `--threads`, `-t` | `THREADS_PER_BLOCK` | `256` | CUDA threads per block |
 | `--gas-price` | `GAS_PRICE_GWEI` | auto | Gas price in gwei |
-| `--gas-limit` | `GAS_LIMIT` | `300000` | Gas limit for mine() tx |
-| `--cuda-lib` | - | auto-detect | Path to .so library |
-| `--cpu` | - | `false` | Use CPU fallback (slow) |
+| `--gas-limit` | `GAS_LIMIT` | `300000` | Gas limit for `mine()` tx |
+| `--cuda-lib` | - | auto | Path to `libhash256miner.so` |
+| `--cpu` | - | `false` | Force CPU mode (testing only) |
 | `--check-interval` | - | `20` | Re-check on-chain challenge every N batches |
-| - | `TELEGRAM_BOT_TOKEN` | - | Telegram bot token (enables notifications) |
-| - | `TELEGRAM_CHAT_ID` | - | Telegram chat id to send alerts to |
-| - | `TELEGRAM_NOTIFY_*` | `1` | Per-event toggles: `START`, `SOLUTION`, `SUCCESS`, `FAIL`, `STOP` |
+| - | `TELEGRAM_BOT_TOKEN` / `_CHAT_ID` | - | Enables Telegram notifications |
+| - | `TELEGRAM_NOTIFY_*` | `1` | Per-event toggles |
 
 ---
 
-## Performance
+## GPU Auto-tune
 
-The miner auto-detects your GPU and picks an appropriate batch size on
-startup (target: ~150-300 ms per kernel launch — long enough to amortize
-launch overhead, short enough to react quickly when the on-chain epoch
-changes). You can always override with `--batch-size` or `BATCH_SIZE` in
-`.env`.
+The miner reads compute capability + SM count from `cudaGetDeviceProperties`
+and picks a batch size that targets ~150-300 ms per kernel launch — long
+enough to amortize launch overhead, short enough to react quickly when the
+on-chain epoch changes.
 
 | GPU | Compute | SMs | Auto batch | Approx hashrate |
 |-----|---------|-----|------------|-----------------|
-| GTX 1080 Ti           | sm_61  | 28  | 16M  | ~150-200 MH/s  |
-| RTX 2070 Super        | sm_75  | 40  | 32M  | ~300-400 MH/s  |
-| RTX 2080 Ti           | sm_75  | 68  | 64M  | ~600-800 MH/s  |
-| RTX 3060              | sm_86  | 28  | 32M  | ~250-350 MH/s  |
-| RTX 3070 / 3070 Ti    | sm_86  | 46-48 | 64M | ~600-800 MH/s |
-| RTX 3080 / 3080 Ti    | sm_86  | 68-80 | 64M | ~1.5-2 GH/s   |
-| RTX 3090              | sm_86  | 82  | 64M  | ~3.0-3.5 GH/s  |
-| RTX 3090 Ti           | sm_86  | 84  | 128M | ~3.2-3.7 GH/s  |
-| RTX 4060 / 4060 Ti    | sm_89  | 24-34 | 32-64M | ~400-700 MH/s |
-| RTX 4070 / Super      | sm_89  | 46-56 | 64M | ~1.2-1.6 GH/s  |
-| RTX 4070 Ti / Super   | sm_89  | 60-66 | 64-128M | ~1.8-2.5 GH/s |
-| RTX 4080 / Super      | sm_89  | 76-80 | 128M | ~3.0-3.6 GH/s |
-| RTX 4090              | sm_89  | 128 | 128M | ~4.0-5.0 GH/s  |
-| RTX 5070 / Ti         | sm_120 | 48-70 | 64-128M | ~1.5-2.5 GH/s |
-| RTX 5080              | sm_120 | 84  | 128M | ~3.5-4.5 GH/s  |
-| RTX 5090              | sm_120 | 170 | 256M | ~6.0-8.0 GH/s  |
-| A100                  | sm_80  | 108 | 128M | ~3.5 GH/s      |
-| H100                  | sm_90  | 132 | 256M | ~6-8 GH/s      |
+| GTX 1080 Ti           | sm_61  | 28    | 16M       | ~150-200 MH/s |
+| RTX 2070 Super        | sm_75  | 40    | 32M       | ~300-400 MH/s |
+| RTX 2080 Ti           | sm_75  | 68    | 64M       | ~600-800 MH/s |
+| RTX 3060              | sm_86  | 28    | 32M       | ~250-350 MH/s |
+| RTX 3070 / 3070 Ti    | sm_86  | 46-48 | 64M       | ~600-800 MH/s |
+| RTX 3080 / 3080 Ti    | sm_86  | 68-80 | 64M       | ~1.5-2 GH/s   |
+| RTX 3090              | sm_86  | 82    | 64M       | ~3.0-3.5 GH/s |
+| RTX 3090 Ti           | sm_86  | 84    | 128M      | ~3.2-3.7 GH/s |
+| RTX 4060 / 4060 Ti    | sm_89  | 24-34 | 32-64M    | ~400-700 MH/s |
+| RTX 4070 / Super      | sm_89  | 46-56 | 64M       | ~1.2-1.6 GH/s |
+| RTX 4070 Ti / Super   | sm_89  | 60-66 | 64-128M   | ~1.8-2.5 GH/s |
+| RTX 4080 / Super      | sm_89  | 76-80 | 128M      | ~3.0-3.6 GH/s |
+| RTX 4090              | sm_89  | 128   | 128M      | ~4.0-5.0 GH/s |
+| RTX 5070 / Ti         | sm_120 | 48-70 | 64-128M   | ~1.5-2.5 GH/s |
+| RTX 5080              | sm_120 | 84    | 128M      | ~3.5-4.5 GH/s |
+| RTX 5090              | sm_120 | 170   | 256M      | ~6.0-8.0 GH/s |
+| A100                  | sm_80  | 108   | 128M      | ~3.5 GH/s     |
+| H100                  | sm_90  | 132   | 256M      | ~6-8 GH/s     |
 
-> Hashrates are estimates from the SM-count × per-SM throughput model used
-> for auto-tuning; real numbers depend on driver, thermals, and the exact
-> SKU (Founder vs AIB, Mobile vs Desktop, etc.). Override the batch size
-> if you observe lower utilization in `nvidia-smi`.
+> Hashrates are model estimates; real numbers depend on driver, thermals,
+> and SKU variant (Ti / Super / Mobile / Founder vs AIB). Override with
+> `--batch-size` if you see GPU utilization < 99% in `nvidia-smi`.
 
 ---
 
 ## Mining Economics
 
-- **Reward:** 100 HASH per successful mint (Era 0)
-- **Gas Cost:** ~$1-5 per mint transaction
-- **Halving:** Every 100,000 mints the reward halves
+- **Reward:** 100 HASH per successful mint at Era 0
+- **Gas cost:** ~$1-5 per `mine()` tx (depends on Ethereum gas price)
+- **Halving:** every 100,000 mints the reward halves
+- **Competition:** even if you find a valid nonce, another miner whose tx
+  lands first in the block will invalidate yours (you'll see
+  `execution reverted`). This is normal.
 
 ---
 
 ## Troubleshooting
 
-### "CUDA library not found"
+### `CUDA library not found`
+The shared library was not built or is in the wrong place.
 ```bash
-cd ~/hash256-miner/cuda && make ARCH=sm_86
+./build.sh                          # auto-detect arch
+# or
+cd cuda && make ARCH=sm_86          # explicit arch
+ls -la cuda/libhash256miner.so
 ```
 
-### "Cannot connect to RPC"
-Try a different RPC:
+### `Cannot connect to RPC`
+Try a different endpoint:
 ```bash
-python3 miner.py --rpc https://rpc.ankr.com/eth --batch-size 33554432
+python miner.py --rpc https://rpc.ankr.com/eth
 ```
+Free public RPCs throttle aggressively. For serious mining use a paid
+endpoint (Alchemy, Infura, QuickNode).
 
-### "Genesis phase not complete"
-Mining hasn't started yet. Wait for genesis to finish at https://hash256.org
+### `Genesis phase not complete`
+Mining isn't active on-chain yet. Check progress at https://hash256.org.
 
-### "execution reverted" on submit
-- Someone else mined the solution first (epoch changed)
-- Insufficient ETH for gas
-- This is normal in competitive mining
+### `execution reverted` on `mine()` submission
+Normal in competitive mining — another miner's tx landed first this block,
+or wallet ran out of ETH for gas. Top up and continue.
 
-### Low hashrate
-- Make sure you built with correct architecture: `make ARCH=sm_86`
-- Try increasing batch size: `--batch-size 67108864` (64M)
-- Check GPU utilization: `nvidia-smi`
+### Low GPU utilization (`nvidia-smi` < 90%)
+- Confirm the library was built for *your* GPU's arch (`./build.sh` does
+  this automatically).
+- Increase batch size: `python miner.py --batch-size 134217728` (128M).
+
+### Telegram not sending
+- Validate token: `curl https://api.telegram.org/bot<TOKEN>/getMe` → must
+  return `"ok": true`.
+- Validate chat id: send `/start` to your bot, then check
+  `https://api.telegram.org/bot<TOKEN>/getUpdates` for `chat.id`.
+- Set `TELEGRAM_NOTIFY_*=1` for the events you want.
+
+### After installing the NVIDIA driver, `nvidia-smi` says nothing
+A reboot is required. Run `sudo reboot`, then re-run `bash setup.sh`.
 
 ---
 
 ## Security
 
-- ⚠️ **Never share your private key**
-- ⚠️ **Never commit `.env` file**
-- Use a dedicated mining wallet with minimal ETH
-- The private key is only used locally to sign `mine()` transactions
+- **Never** share your private key. **Never** commit `.env`.
+- Use a dedicated mining wallet with only the ETH needed for gas.
+- The private key only signs `mine()` calls locally — it is never sent
+  anywhere.
+- `setup.sh` chmod's `.env` to `600` (owner read-only).
+- Telegram messages contain only short hash/nonce previews and tx URLs —
+  never your private key.
 
 ---
 
@@ -320,19 +341,18 @@ Mining hasn't started yet. Wait for genesis to finish at https://hash256.org
 
 ```
 hash256-miner/
-├── miner.py              # Main CLI, mining loop, Telegram notifier
+├── miner.py              # CLI, mining loop, RPC, Telegram notifier
 ├── cuda/
-│   ├── keccak256.cuh     # Keccak-256 CUDA implementation
-│   ├── miner_kernel.cu   # GPU mining kernel (set_job + persistent buffers)
-│   ├── Makefile          # Build script
-│   └── libhash256miner.so  # (compiled output)
-├── .env.example          # Config template (PRIVATE_KEY, RPC, TELEGRAM_*)
-├── .env                  # Your config (gitignored)
-├── requirements.txt      # Python deps
-├── hash256-miner.service # systemd service file
-├── build.sh              # Build helper (auto-detects GPU arch)
-├── install.sh            # Quick auto-installer (driver + CUDA + build)
-├── setup.sh              # Full one-shot installer (all 12 steps + .env wizard + Telegram test)
+│   ├── keccak256.cuh     # Keccak-256 device implementation
+│   ├── miner_kernel.cu   # GPU brute-force kernel + host glue
+│   └── Makefile          # nvcc build (ARCH ?= sm_86)
+├── requirements.txt      # Python deps (web3, eth-account)
+├── .env.example          # Config template
+├── .env                  # Your config (gitignored, chmod 600)
+├── hash256-miner.service # systemd unit
+├── setup.sh              # Full one-shot installer (recommended)
+├── install.sh            # Lightweight installer (legacy)
+├── build.sh              # Just builds the CUDA library
 ├── .gitignore
 └── README.md
 ```
@@ -341,4 +361,5 @@ hash256-miner/
 
 ## License
 
-MIT - Use at your own risk. Mining involves gas costs and competition.
+MIT. Use at your own risk — mining costs gas and you're racing other
+miners. Past performance is not a guarantee of future hashrate.
