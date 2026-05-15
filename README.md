@@ -278,8 +278,34 @@ auto-start behavior without touching `/etc/systemd`.
 
 #### 5. systemd (classic, needs root)
 
+The easiest path is to let `setup.sh` step 11 (option 5) generate and
+install the unit for you — it knows your install dir, user, and venv.
+If you prefer to do it manually, create `/etc/systemd/system/hash256-miner.service`:
+
+```ini
+[Unit]
+Description=HASH256 GPU Miner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/hash256-miner
+EnvironmentFile=/home/YOUR_USER/hash256-miner/.env
+ExecStart=/home/YOUR_USER/hash256-miner/run-miner.sh --no-log
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then:
+
 ```bash
-sudo cp hash256-miner.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now hash256-miner
 sudo journalctl -fu hash256-miner
@@ -434,9 +460,7 @@ hash256-miner/
 ├── .env                  # Your config (gitignored, chmod 600)
 ├── run-miner.sh          # Universal launcher (venv + lock + logs)
 ├── ecosystem.config.js   # PM2 config (used by option 4)
-├── hash256-miner.service # systemd unit (used by option 5)
 ├── setup.sh              # Full one-shot installer (recommended)
-├── install.sh            # Lightweight installer (legacy)
 ├── build.sh              # Just builds the CUDA library
 ├── .gitignore
 └── README.md
