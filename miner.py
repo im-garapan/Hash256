@@ -647,6 +647,9 @@ def main():
             print(f"  [!] {e}\n  [!] Falling back to CPU...\n")
             miner = CPUMiner()
 
+    # Detect actual mode (handles auto-fallback when CUDA lib missing).
+    mode_label = "CUDA GPU" if isinstance(miner, GPUMiner) else "CPU"
+
     # Connect to contract
     print("  [INIT] Connecting to Ethereum...")
     contract = HashContract(args.rpc, pk)
@@ -676,13 +679,13 @@ def main():
         print(f"  [CONFIG] Batch size: {args.batch_size:,}  (auto: {label})")
     else:
         print(f"  [CONFIG] Batch size: {args.batch_size:,}  (manual override)")
-    print(f"  [CONFIG] Mode: {'CPU' if args.cpu else 'CUDA GPU'}")
+    print(f"  [CONFIG] Mode: {mode_label}")
     print(f"  [START] Mining started!\n")
 
     tg.send("start",
             "🚀 <b>HASH256 miner started</b>\n"
             f"Wallet: <code>{short_addr(contract.wallet)}</code>\n"
-            f"Mode: {'CPU' if args.cpu else 'CUDA GPU'}\n"
+            f"Mode: {mode_label}\n"
             f"Batch: {args.batch_size:,}")
 
     total_hashes = 0
