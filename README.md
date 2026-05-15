@@ -33,6 +33,24 @@ GPU-accelerated CLI miner for [HASH token](https://hash256.org) on Ethereum Main
 
 ## Step-by-Step Setup (Fresh VPS)
 
+### Quick install (one command, fully interactive)
+
+If you just want everything set up end-to-end on a fresh Ubuntu/Debian VPS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mrfunntastiic/artifacts/main/hash256-miner/setup.sh -o setup.sh
+bash setup.sh
+```
+
+`setup.sh` handles **all 12 steps** below in one go (driver, CUDA, Python venv,
+build, .env, optional Telegram test, optional systemd) and shows a clear
+error message indicating exactly which step failed and why if anything
+goes wrong. Pass `--yes` for non-interactive defaults, `--skip-driver` /
+`--skip-cuda` if those are already installed, or `--no-service` to skip
+the systemd prompt. Full log is written to `setup.log`.
+
+If you prefer to do it manually, follow the steps below.
+
 ### Step 1: Update System & Install Dependencies
 
 ```bash
@@ -114,11 +132,24 @@ Fill in:
 ```
 PRIVATE_KEY=your_private_key_here_without_0x
 RPC_URL=https://eth.llamarpc.com
+
+# Optional Telegram alerts (start / solution / success / fail / stop)
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
 ```
 
 > ⚠️ **IMPORTANT:** Your wallet needs ETH for gas fees. Each `mine()` transaction costs ~$1-5 depending on gas prices.
 
 Save: `Ctrl+O` → `Enter` → `Ctrl+X`
+
+#### Telegram Setup (optional)
+
+1. Talk to [@BotFather](https://t.me/BotFather), create a bot, copy the token.
+2. Talk to [@userinfobot](https://t.me/userinfobot) (or send `/start` to your bot then check `https://api.telegram.org/bot<TOKEN>/getUpdates`) to get your chat id.
+3. Put both into `.env` as `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
+4. Toggle individual events with `TELEGRAM_NOTIFY_*` flags (`1`/`0`).
+
+Leave the token empty to disable notifications entirely.
 
 ### Step 8: Test Run
 
@@ -191,23 +222,52 @@ cd ~/hash256-miner && screen -dmS miner python3 miner.py --batch-size 33554432
 |------|-------------|---------|-------------|
 | `--private-key`, `-k` | `PRIVATE_KEY` | - | Your private key (required) |
 | `--rpc`, `-r` | `RPC_URL` | `https://eth.llamarpc.com` | Ethereum RPC endpoint |
-| `--batch-size`, `-b` | - | `33554432` (32M) | Nonces per GPU batch |
-| `--threads`, `-t` | - | `256` | CUDA threads per block |
-| `--gas-price` | - | auto | Gas price in gwei |
-| `--gas-limit` | - | `300000` | Gas limit for mine() tx |
+| `--batch-size`, `-b` | `BATCH_SIZE` | auto | Nonces per GPU batch (auto-tuned per GPU) |
+| `--threads`, `-t` | `THREADS_PER_BLOCK` | `256` | CUDA threads per block |
+| `--gas-price` | `GAS_PRICE_GWEI` | auto | Gas price in gwei |
+| `--gas-limit` | `GAS_LIMIT` | `300000` | Gas limit for mine() tx |
 | `--cuda-lib` | - | auto-detect | Path to .so library |
 | `--cpu` | - | `false` | Use CPU fallback (slow) |
+| `--check-interval` | - | `20` | Re-check on-chain challenge every N batches |
+| - | `TELEGRAM_BOT_TOKEN` | - | Telegram bot token (enables notifications) |
+| - | `TELEGRAM_CHAT_ID` | - | Telegram chat id to send alerts to |
+| - | `TELEGRAM_NOTIFY_*` | `1` | Per-event toggles: `START`, `SOLUTION`, `SUCCESS`, `FAIL`, `STOP` |
 
 ---
 
 ## Performance
 
-| GPU | Hashrate | Batch Size |
-|-----|----------|-----------|
-| GTX 1080 | ~200-400 MH/s | `16777216` |
-| RTX 3070 | ~500-800 MH/s | `33554432` |
-| RTX 3090 | ~3000-3500 MH/s | `33554432` |
-| RTX 4090 | ~4000-5000 MH/s | `33554432` |
+The miner auto-detects your GPU and picks an appropriate batch size on
+startup (target: ~150-300 ms per kernel launch — long enough to amortize
+launch overhead, short enough to react quickly when the on-chain epoch
+changes). You can always override with `--batch-size` or `BATCH_SIZE` in
+`.env`.
+
+| GPU | Compute | SMs | Auto batch | Approx hashrate |
+|-----|---------|-----|------------|-----------------|
+| GTX 1080 Ti           | sm_61  | 28  | 16M  | ~150-200 MH/s  |
+| RTX 2070 Super        | sm_75  | 40  | 32M  | ~300-400 MH/s  |
+| RTX 2080 Ti           | sm_75  | 68  | 64M  | ~600-800 MH/s  |
+| RTX 3060              | sm_86  | 28  | 32M  | ~250-350 MH/s  |
+| RTX 3070 / 3070 Ti    | sm_86  | 46-48 | 64M | ~600-800 MH/s |
+| RTX 3080 / 3080 Ti    | sm_86  | 68-80 | 64M | ~1.5-2 GH/s   |
+| RTX 3090              | sm_86  | 82  | 64M  | ~3.0-3.5 GH/s  |
+| RTX 3090 Ti           | sm_86  | 84  | 128M | ~3.2-3.7 GH/s  |
+| RTX 4060 / 4060 Ti    | sm_89  | 24-34 | 32-64M | ~400-700 MH/s |
+| RTX 4070 / Super      | sm_89  | 46-56 | 64M | ~1.2-1.6 GH/s  |
+| RTX 4070 Ti / Super   | sm_89  | 60-66 | 64-128M | ~1.8-2.5 GH/s |
+| RTX 4080 / Super      | sm_89  | 76-80 | 128M | ~3.0-3.6 GH/s |
+| RTX 4090              | sm_89  | 128 | 128M | ~4.0-5.0 GH/s  |
+| RTX 5070 / Ti         | sm_120 | 48-70 | 64-128M | ~1.5-2.5 GH/s |
+| RTX 5080              | sm_120 | 84  | 128M | ~3.5-4.5 GH/s  |
+| RTX 5090              | sm_120 | 170 | 256M | ~6.0-8.0 GH/s  |
+| A100                  | sm_80  | 108 | 128M | ~3.5 GH/s      |
+| H100                  | sm_90  | 132 | 256M | ~6-8 GH/s      |
+
+> Hashrates are estimates from the SM-count × per-SM throughput model used
+> for auto-tuning; real numbers depend on driver, thermals, and the exact
+> SKU (Founder vs AIB, Mobile vs Desktop, etc.). Override the batch size
+> if you observe lower utilization in `nvidia-smi`.
 
 ---
 
@@ -260,18 +320,19 @@ Mining hasn't started yet. Wait for genesis to finish at https://hash256.org
 
 ```
 hash256-miner/
-├── miner.py              # Main CLI & mining loop
+├── miner.py              # Main CLI, mining loop, Telegram notifier
 ├── cuda/
 │   ├── keccak256.cuh     # Keccak-256 CUDA implementation
-│   ├── miner_kernel.cu   # GPU mining kernel
+│   ├── miner_kernel.cu   # GPU mining kernel (set_job + persistent buffers)
 │   ├── Makefile          # Build script
 │   └── libhash256miner.so  # (compiled output)
-├── .env.example          # Config template
+├── .env.example          # Config template (PRIVATE_KEY, RPC, TELEGRAM_*)
 ├── .env                  # Your config (gitignored)
 ├── requirements.txt      # Python deps
 ├── hash256-miner.service # systemd service file
-├── build.sh             # Build helper
-├── install.sh           # Auto-installer
+├── build.sh              # Build helper (auto-detects GPU arch)
+├── install.sh            # Quick auto-installer (driver + CUDA + build)
+├── setup.sh              # Full one-shot installer (all 12 steps + .env wizard + Telegram test)
 ├── .gitignore
 └── README.md
 ```

@@ -1,9 +1,24 @@
 #!/bin/bash
 # HASH256 GPU Miner - VPS One-Command Installer
 # Usage: curl -sSL https://raw.githubusercontent.com/mrfunntastiic/artifacts/main/hash256-miner/install.sh | bash
-set -e
+set -euo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+
+log()  { echo -e "${CYAN}[*]${NC} $*"; }
+ok()   { echo -e "${GREEN}[+]${NC} $*"; }
+warn() { echo -e "${YELLOW}[!]${NC} $*"; }
+err()  { echo -e "${RED}[x]${NC} $*" >&2; }
+
+SUDO=""
+if [ "$(id -u)" -ne 0 ]; then
+    if command -v sudo >/dev/null 2>&1; then
+        SUDO="sudo"
+    else
+        err "Need root or sudo for package installation."
+        exit 1
+    fi
+fi
 
 echo -e "${CYAN}"
 echo "╔══════════════════════════════════════════════════╗"
@@ -11,77 +26,126 @@ echo "║     HASH256 GPU Miner - VPS Auto-Installer      ║"
 echo "╚══════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
-# Detect OS
-if [ -f /etc/os-release ]; then . /etc/os-release; OS=$ID; else OS="unknown"; fi
-echo -e "${GREEN}[+] OS: $OS${NC}"
+# ── 0. Detect OS ────────────────────────────────────────────────────────
+OS="unknown"
+if [ -f /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    OS="${ID:-unknown}"
+fi
+ok "OS: $OS"
 
-# 1. NVIDIA Driver
-echo -e "\n${YELLOW}[1/5] NVIDIA Drivers...${NC}"
-if ! command -v nvidia-smi &>/dev/null; then
-    if [ "$OS" == "ubuntu" ] || [ "$OS" == "debian" ]; then
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq ubuntu-drivers-common
-        sudo ubuntu-drivers autoinstall
+APT_OS=0
+if [ "$OS" = "ubuntu" ] || [ "$OS" = "debian" ]; then
+    APT_OS=1
+fi
+
+# ── 1. NVIDIA driver ────────────────────────────────────────────────────
+log "[1/5] NVIDIA driver"
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+    if [ "$APT_OS" = "1" ]; then
+        $SUDO apt-get update -qq
+        $SUDO apt-get install -y -qq ubuntu-drivers-common
+        $SUDO ubuntu-drivers autoinstall || warn "ubuntu-drivers autoinstall failed; install manually."
+        warn "A reboot is typically required after installing NVIDIA drivers."
     else
-        echo -e "${RED}Install NVIDIA drivers manually: https://developer.nvidia.com/cuda-downloads${NC}"
+        err "Install NVIDIA drivers manually: https://developer.nvidia.com/cuda-downloads"
     fi
 else
-    echo -e "${GREEN}  OK: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)${NC}"
+    ok "Detected: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
 fi
 
-# 2. CUDA
-echo -e "\n${YELLOW}[2/5] CUDA Toolkit...${NC}"
-if ! command -v nvcc &>/dev/null; then
-    if [ "$OS" == "ubuntu" ] || [ "$OS" == "debian" ]; then
-        sudo apt-get install -y -qq nvidia-cuda-toolkit build-essential
+# ── 2. CUDA toolkit ─────────────────────────────────────────────────────
+log "[2/5] CUDA toolkit"
+if ! command -v nvcc >/dev/null 2>&1; then
+    if [ "$APT_OS" = "1" ]; then
+        $SUDO apt-get install -y -qq nvidia-cuda-toolkit build-essential
     else
-        echo -e "${RED}Install CUDA: https://developer.nvidia.com/cuda-downloads${NC}"; exit 1
+        err "Install CUDA: https://developer.nvidia.com/cuda-downloads"
+        exit 1
     fi
 else
-    echo -e "${GREEN}  OK: $(nvcc --version | grep release | awk '{print $5}' | tr -d ',')${NC}"
+    ok "Detected: $(nvcc --version | grep release | awk '{print $5}' | tr -d ',')"
 fi
 
-# 3. Python
-echo -e "\n${YELLOW}[3/5] Python3...${NC}"
-if ! command -v python3 &>/dev/null; then
-    sudo apt-get install -y -qq python3 python3-pip
+# ── 3. Python ───────────────────────────────────────────────────────────
+log "[3/5] Python 3"
+if ! command -v python3 >/dev/null 2>&1; then
+    if [ "$APT_OS" = "1" ]; then
+        $SUDO apt-get install -y -qq python3 python3-pip
+    else
+        err "Install Python 3 manually."
+        exit 1
+    fi
 else
-    echo -e "${GREEN}  OK: $(python3 --version)${NC}"
+    ok "Detected: $(python3 --version)"
 fi
 
-# 4. Clone & Build
-echo -e "\n${YELLOW}[4/5] Setting up miner...${NC}"
-INSTALL_DIR="$HOME/hash256-miner"
+# Choose pip command
+PIP="pip3"
+if ! command -v pip3 >/dev/null 2>&1; then
+    if command -v pip >/dev/null 2>&1; then
+        PIP="pip"
+    else
+        if [ "$APT_OS" = "1" ]; then
+            $SUDO apt-get install -y -qq python3-pip
+        fi
+    fi
+fi
 
-if [ -d "$INSTALL_DIR" ]; then
-    cd "$INSTALL_DIR" && git pull --quiet 2>/dev/null || true
+# ── 4. Source + build ───────────────────────────────────────────────────
+log "[4/5] Setting up miner"
+INSTALL_DIR="${HASH256_INSTALL_DIR:-$HOME/hash256-miner}"
+
+if [ -d "$INSTALL_DIR/.git" ]; then
+    log "Existing repo at $INSTALL_DIR — pulling latest"
+    git -C "$INSTALL_DIR" pull --quiet || warn "git pull failed; continuing with current checkout."
+elif [ -d "$INSTALL_DIR" ]; then
+    warn "Directory $INSTALL_DIR exists but is not a git repo — keeping as-is."
 else
-    git clone --depth 1 https://github.com/mrfunntastiic/artifacts.git /tmp/h256tmp 2>/dev/null
-    cp -r /tmp/h256tmp/hash256-miner "$INSTALL_DIR"
-    rm -rf /tmp/h256tmp
+    TMPDIR=$(mktemp -d)
+    log "Cloning into $TMPDIR ..."
+    git clone --depth 1 https://github.com/mrfunntastiic/artifacts.git "$TMPDIR"
+    cp -r "$TMPDIR/hash256-miner" "$INSTALL_DIR"
+    rm -rf "$TMPDIR"
 fi
 
 cd "$INSTALL_DIR"
-pip3 install -q web3 eth-account 2>/dev/null || pip install -q web3 eth-account
 
-# Auto-detect GPU arch
-GPU_ARCH="sm_61"
-if command -v nvidia-smi &>/dev/null; then
-    CC=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d '.')
-    [ ! -z "$CC" ] && GPU_ARCH="sm_${CC}"
+log "Installing Python dependencies"
+if [ -f requirements.txt ]; then
+    $PIP install -q -r requirements.txt
+else
+    $PIP install -q web3 eth-account
 fi
-echo -e "${GREEN}  Building CUDA (arch: $GPU_ARCH)...${NC}"
-cd cuda && make clean 2>/dev/null; make ARCH="$GPU_ARCH"
-cd "$INSTALL_DIR"
 
-# 5. Config
-echo -e "\n${YELLOW}[5/5] Config...${NC}"
-[ ! -f .env ] && cp .env.example .env
+# Auto-detect GPU compute capability for nvcc -arch
+GPU_ARCH="sm_86"
+if command -v nvidia-smi >/dev/null 2>&1; then
+    CC=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
+         | head -1 | tr -d '. ')
+    if [ -n "$CC" ]; then
+        GPU_ARCH="sm_${CC}"
+    fi
+fi
 
-echo -e "\n${CYAN}╔══════════════════════════════════════════════════╗"
-echo "║            DONE! Edit .env then start mining     ║"
+log "Building CUDA library (ARCH=$GPU_ARCH)"
+( cd cuda && make clean >/dev/null 2>&1 || true; make ARCH="$GPU_ARCH" )
+
+# ── 5. Config ───────────────────────────────────────────────────────────
+log "[5/5] Config"
+if [ ! -f .env ]; then
+    cp .env.example .env
+    ok "Created .env from .env.example"
+else
+    ok ".env already exists — left untouched"
+fi
+
+echo ""
+echo -e "${CYAN}╔══════════════════════════════════════════════════╗"
+echo "║   DONE! Edit .env then start mining             ║"
 echo "╚══════════════════════════════════════════════════╝${NC}"
 echo ""
-echo "  nano ~/hash256-miner/.env"
-echo "  cd ~/hash256-miner && python3 miner.py"
+echo "  nano $INSTALL_DIR/.env        # set PRIVATE_KEY (and optionally TELEGRAM_*)"
+echo "  cd $INSTALL_DIR && python3 miner.py"
 echo ""
