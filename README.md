@@ -68,7 +68,7 @@ shot:
 | 8    | Build CUDA library with auto-detected `-arch=sm_*` |
 | 9    | Interactive `.env` wizard (PRIVATE_KEY hidden, RPC, Telegram) |
 | 10   | Send a test message to Telegram (optional) |
-| 11   | Install systemd service (optional) |
+| 11   | **Background runner** — pick screen / tmux / cron / PM2 / systemd / skip |
 | 12   | Health check (deps importable, miner.py loads, .env sane) |
 
 If anything fails the script prints a banner with the **failed step,
@@ -185,37 +185,120 @@ You'll receive messages like:
 
 ## Run the Miner
 
+The recommended entry point is `run-miner.sh` — it activates the venv,
+acquires a single-instance lock, and writes logs to `miner.log`. Every
+supervisor option below ultimately calls this same script.
+
 ### Foreground (terminal stays open)
 
 ```bash
 cd ~/hash256-miner
-source .venv/bin/activate
-python miner.py
+./run-miner.sh
 ```
 
-### Background with `screen` (survives SSH disconnect)
+Pass extra arguments to `miner.py` after `--`:
 
 ```bash
-screen -dmS miner bash -c 'cd ~/hash256-miner && source .venv/bin/activate && python miner.py'
-screen -r miner            # attach
-# Ctrl+A then D             to detach without stopping
+./run-miner.sh -- --batch-size 67108864 --cpu
 ```
 
-### Background with `systemd` (auto-start on reboot)
+### Background — pick whichever fits your VPS
 
-If you said yes during `setup.sh`, the service is already installed.
-Otherwise:
+`setup.sh` step 11 prompts for one of these. You can also do it manually
+later. They are listed roughly from "simplest, no auto-restart" to "most
+robust, requires root".
+
+#### 1. screen (manual reattach)
+
+```bash
+screen -dmS miner ~/hash256-miner/run-miner.sh
+screen -r miner            # attach
+# Ctrl+A then D            detach without stopping
+```
+
+Pros: zero deps after `apt install screen`, dead simple.
+Cons: does not auto-restart on crash, does not auto-start on reboot.
+
+#### 2. tmux (same idea, slightly nicer)
+
+```bash
+tmux new -d -s miner '~/hash256-miner/run-miner.sh'
+tmux attach -t miner
+# Ctrl+B then D            detach
+```
+
+Pros/cons same as screen.
+
+#### 3. cron `@reboot` — recommended portable option
+
+This survives reboots without editing any system files:
+
+```bash
+( crontab -l 2>/dev/null | grep -v hash256-miner;
+  echo "@reboot $HOME/hash256-miner/run-miner.sh >> $HOME/hash256-miner/miner.cron.log 2>&1" \
+) | crontab -
+
+# Start it now without rebooting:
+~/hash256-miner/run-miner.sh &
+```
+
+Pros: no root needed, no systemd edits, works on every Linux. The
+wrapper has a flock-based lockfile, so even if cron fires twice you
+won't get duplicate miners.
+Cons: only restarts on **reboot**, not on crash.
+
+#### 4. PM2 — proper process manager
+
+```bash
+# One-time
+sudo apt install -y nodejs npm
+sudo npm install -g pm2
+
+# Start + persist
+cd ~/hash256-miner
+pm2 start ecosystem.config.js
+pm2 save
+
+# Auto-resurrect on reboot WITHOUT systemd:
+( crontab -l 2>/dev/null | grep -v 'pm2 resurrect';
+  echo "@reboot PM2_HOME=$HOME/.pm2 $(which pm2) resurrect >/dev/null 2>&1" \
+) | crontab -
+
+# Day-to-day:
+pm2 status
+pm2 logs hash256-miner
+pm2 restart hash256-miner
+pm2 stop    hash256-miner
+```
+
+Pros: auto-restart on crash, log rotation, one command status.
+Cons: pulls in Node/npm. `pm2 startup` itself wants to write a systemd
+unit; the cron `@reboot pm2 resurrect` line above gives you the same
+auto-start behavior without touching `/etc/systemd`.
+
+#### 5. systemd (classic, needs root)
 
 ```bash
 sudo cp hash256-miner.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now hash256-miner
-sudo journalctl -fu hash256-miner   # follow logs
+sudo journalctl -fu hash256-miner
 ```
 
-> Edit the service file beforehand if you want a non-root user or a
-> different working directory. `setup.sh` writes a service that uses your
-> current user and the venv automatically.
+Pros: cleanest crash-restart + reboot behavior on hosts that have
+systemd.
+Cons: needs root, edits files under `/etc/systemd/system/`. Won't work
+on minimal containers, OpenVZ, or hosts where systemd is disabled.
+
+### Which one should I pick?
+
+| Situation | Best option |
+|-----------|-------------|
+| Just trying it out                                  | foreground or `screen` |
+| Don't want to touch system files, fine with reboot only restart | cron `@reboot` (option 3) |
+| Want crash-restart + status UI, OK installing Node  | PM2 (option 4) |
+| Have full root + systemd available                  | systemd (option 5) |
+| Container without systemd (LXC, some OpenVZ)        | cron or PM2 |
 
 ---
 
@@ -349,7 +432,9 @@ hash256-miner/
 ├── requirements.txt      # Python deps (web3, eth-account)
 ├── .env.example          # Config template
 ├── .env                  # Your config (gitignored, chmod 600)
-├── hash256-miner.service # systemd unit
+├── run-miner.sh          # Universal launcher (venv + lock + logs)
+├── ecosystem.config.js   # PM2 config (used by option 4)
+├── hash256-miner.service # systemd unit (used by option 5)
 ├── setup.sh              # Full one-shot installer (recommended)
 ├── install.sh            # Lightweight installer (legacy)
 ├── build.sh              # Just builds the CUDA library

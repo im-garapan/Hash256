@@ -13,7 +13,7 @@
 #   8.  Build CUDA library (auto-detect ARCH)
 #   9.  Interactive .env config (PRIVATE_KEY, RPC, Telegram)
 #  10.  Optional Telegram test message
-#  11.  Optional systemd service install
+#  11.  Background runner: pick screen / tmux / cron / pm2 / systemd / skip
 #  12.  Final health check + run instructions
 #
 # Each step prints a clear banner. On ANY failure, an ERR trap reports:
@@ -28,7 +28,7 @@
 #   bash setup.sh --yes                 # accept defaults, no prompts
 #   bash setup.sh --skip-driver         # skip NVIDIA driver install
 #   bash setup.sh --skip-cuda           # skip CUDA toolkit install
-#   bash setup.sh --no-service          # don't ask about systemd
+#   bash setup.sh --no-service          # don't prompt for background runner
 #   bash setup.sh --dir /opt/hash256    # custom install directory
 # ============================================================================
 
@@ -99,9 +99,10 @@ on_error() {
             echo "  • Network/firewall blocking github.com"
             echo "  • Run in an existing checkout: 'cd <dir> && bash setup.sh --dir .'"
             ;;
-        *"systemd"*)
-            echo "  • Not running on a systemd host (containers, WSL1)"
-            echo "  • Use --no-service to skip"
+        *"systemd"*|*"Background runner"*)
+            echo "  • systemd not available (containers / WSL1) — pick option 1-4 instead"
+            echo "  • Run with --no-service to skip the supervisor step entirely"
+            echo "  • PM2 needs Node/npm; if apt fails, install via NodeSource"
             ;;
     esac
     echo ""
@@ -538,21 +539,144 @@ else
     mark_skipped "user declined"
 fi
 
-# ─────────────────── Step 11: systemd service (optional) ───────────────────
-step "Step 11/12 — systemd service (optional)"
+# ─────────────────── Step 11: background runner (optional) ────────────────
+step "Step 11/12 — Background runner (optional)"
+
+# Make wrapper executable so every option below can use it.
+chmod +x "$INSTALL_DIR/run-miner.sh" 2>/dev/null || true
+
+# Track which option was chosen so the final summary prints the right hint.
+SUPERVISOR_CHOSEN=""
 
 if [ "$NO_SERVICE" = "1" ]; then
     mark_skipped "user --no-service"
-elif ! command -v systemctl >/dev/null 2>&1 || ! [ -d /etc/systemd/system ]; then
-    warn "systemd not available."
-    mark_skipped "no systemd"
-elif [ "$(prompt_yes_no "Install systemd service for auto-start on boot?" n)" = "y" ]; then
-    SERVICE_NAME="hash256-miner.service"
-    SERVICE_PATH="/etc/systemd/system/$SERVICE_NAME"
-    USER_NAME=$(id -un)
+else
+    echo ""
+    info "How do you want to run the miner in the background?"
+    echo "  1) screen     — simplest, manual reattach with 'screen -r miner'"
+    echo "  2) tmux       — like screen, slightly nicer UX"
+    echo "  3) cron       — auto-start on reboot (no root, no systemd edits)"
+    echo "  4) PM2        — Node-based process manager (auto-install if missing)"
+    echo "  5) systemd    — classic Linux service (needs root, edits /etc/systemd)"
+    echo "  6) skip       — just run manually with ./run-miner.sh"
+    echo ""
 
-    info "Writing $SERVICE_PATH (User=$USER_NAME)..."
-    $SUDO tee "$SERVICE_PATH" >/dev/null <<EOF
+    if [ "$ASSUME_YES" = "1" ]; then
+        # Default in --yes mode: cron @reboot (most portable, no systemd, no extra deps)
+        CHOICE="3"
+        info "--yes mode: defaulting to option 3 (cron @reboot)"
+    else
+        read -r -p "Choose [1-6, default=3]: " CHOICE || CHOICE=""
+        CHOICE="${CHOICE:-3}"
+    fi
+
+    case "$CHOICE" in
+        # ── 1. screen ──────────────────────────────────────────────
+        1)
+            if ! command -v screen >/dev/null 2>&1; then
+                info "Installing screen..."
+                $SUDO apt-get install -y -qq screen
+            fi
+            SUPERVISOR_CHOSEN="screen"
+            ok "Screen ready. Start it with:"
+            echo "    screen -dmS miner $INSTALL_DIR/run-miner.sh"
+            echo "    screen -r miner            # attach"
+            echo "    Ctrl+A then D              # detach without stopping"
+            mark_ok
+            ;;
+
+        # ── 2. tmux ────────────────────────────────────────────────
+        2)
+            if ! command -v tmux >/dev/null 2>&1; then
+                info "Installing tmux..."
+                $SUDO apt-get install -y -qq tmux
+            fi
+            SUPERVISOR_CHOSEN="tmux"
+            ok "Tmux ready. Start it with:"
+            echo "    tmux new -d -s miner '$INSTALL_DIR/run-miner.sh'"
+            echo "    tmux attach -t miner       # attach"
+            echo "    Ctrl+B then D              # detach without stopping"
+            mark_ok
+            ;;
+
+        # ── 3. cron @reboot (recommended portable option) ──────────
+        3)
+            if ! command -v crontab >/dev/null 2>&1; then
+                info "Installing cron..."
+                $SUDO apt-get install -y -qq cron
+                $SUDO systemctl enable cron 2>/dev/null || true
+                $SUDO service cron start 2>/dev/null || true
+            fi
+
+            CRON_LINE="@reboot $INSTALL_DIR/run-miner.sh >> $INSTALL_DIR/miner.cron.log 2>&1"
+            CRON_TAG="# hash256-miner"
+            TMP_CRON=$(mktemp)
+            crontab -l 2>/dev/null | grep -v 'hash256-miner' > "$TMP_CRON" || true
+            {
+                echo "$CRON_TAG"
+                echo "$CRON_LINE"
+            } >> "$TMP_CRON"
+            crontab "$TMP_CRON"
+            rm -f "$TMP_CRON"
+
+            SUPERVISOR_CHOSEN="cron"
+            ok "Cron @reboot installed for user '$(id -un)'."
+            echo "    Start now : $INSTALL_DIR/run-miner.sh &"
+            echo "    Logs      : $INSTALL_DIR/miner.cron.log + $INSTALL_DIR/miner.log"
+            echo "    Verify    : crontab -l | grep hash256-miner"
+            echo "    Remove    : crontab -e   (delete the @reboot line)"
+            warn "Cron only restarts on REBOOT, not on crash. The wrapper has a"
+            warn "lockfile to prevent double-start, but for crash-restart use PM2 (4) or systemd (5)."
+            mark_ok
+            ;;
+
+        # ── 4. PM2 ─────────────────────────────────────────────────
+        4)
+            if ! command -v pm2 >/dev/null 2>&1; then
+                if ! command -v npm >/dev/null 2>&1; then
+                    info "Installing Node.js + npm (for PM2)..."
+                    $SUDO apt-get install -y -qq nodejs npm
+                fi
+                info "Installing PM2 globally..."
+                $SUDO npm install -g pm2
+            fi
+
+            info "Starting miner under PM2..."
+            ( cd "$INSTALL_DIR" && pm2 start ecosystem.config.js )
+            pm2 save >/dev/null
+
+            # PM2's own 'pm2 startup' writes a systemd unit, which the user wants
+            # to avoid. Use a cron @reboot pm2-resurrect line instead.
+            PM2_BIN="$(command -v pm2)"
+            PM2_HOME="${PM2_HOME:-$HOME/.pm2}"
+            PM2_CRON="@reboot PM2_HOME=$PM2_HOME $PM2_BIN resurrect >/dev/null 2>&1"
+            TMP_CRON=$(mktemp)
+            crontab -l 2>/dev/null | grep -v 'pm2 resurrect' > "$TMP_CRON" || true
+            echo "$PM2_CRON" >> "$TMP_CRON"
+            crontab "$TMP_CRON"
+            rm -f "$TMP_CRON"
+
+            SUPERVISOR_CHOSEN="pm2"
+            ok "PM2 started, process saved, cron @reboot pm2 resurrect installed."
+            echo "    Status : pm2 status"
+            echo "    Logs   : pm2 logs hash256-miner"
+            echo "    Stop   : pm2 stop  hash256-miner"
+            echo "    Remove : pm2 delete hash256-miner && pm2 save"
+            mark_ok
+            ;;
+
+        # ── 5. systemd (classic) ───────────────────────────────────
+        5)
+            if ! command -v systemctl >/dev/null 2>&1 || ! [ -d /etc/systemd/system ]; then
+                err "systemd not available on this host."
+                mark_skipped "no systemd"
+            else
+                SERVICE_NAME="hash256-miner.service"
+                SERVICE_PATH="/etc/systemd/system/$SERVICE_NAME"
+                USER_NAME=$(id -un)
+
+                info "Writing $SERVICE_PATH (User=$USER_NAME)..."
+                $SUDO tee "$SERVICE_PATH" >/dev/null <<EOF
 [Unit]
 Description=HASH256 GPU Miner
 After=network-online.target
@@ -563,7 +687,7 @@ Type=simple
 User=$USER_NAME
 WorkingDirectory=$INSTALL_DIR
 EnvironmentFile=$ENV_FILE
-ExecStart=$VENV_DIR/bin/python $INSTALL_DIR/miner.py
+ExecStart=$INSTALL_DIR/run-miner.sh --no-log
 Restart=on-failure
 RestartSec=30
 StandardOutput=journal
@@ -572,14 +696,30 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
-    $SUDO systemctl daemon-reload
-    $SUDO systemctl enable "$SERVICE_NAME" >/dev/null
-    ok "Service installed and enabled (not started yet)."
-    info "  Start now : sudo systemctl start hash256-miner"
-    info "  View logs : sudo journalctl -fu hash256-miner"
-    mark_ok
-else
-    mark_skipped "user declined"
+                $SUDO systemctl daemon-reload
+                $SUDO systemctl enable "$SERVICE_NAME" >/dev/null
+                SUPERVISOR_CHOSEN="systemd"
+                ok "Service installed and enabled (not started yet)."
+                echo "    Start : sudo systemctl start hash256-miner"
+                echo "    Logs  : sudo journalctl -fu hash256-miner"
+                echo "    Stop  : sudo systemctl stop hash256-miner"
+                mark_ok
+            fi
+            ;;
+
+        # ── 6. skip ─────────────────────────────────────────────────
+        6|n|N|skip|SKIP)
+            SUPERVISOR_CHOSEN="manual"
+            ok "Skipping. Run manually with: $INSTALL_DIR/run-miner.sh"
+            mark_skipped "user chose manual"
+            ;;
+
+        *)
+            warn "Unknown choice '$CHOICE'; skipping."
+            SUPERVISOR_CHOSEN="manual"
+            mark_skipped "invalid choice '$CHOICE'"
+            ;;
+    esac
 fi
 
 # ─────────────────── Step 12: health check ─────────────────────────────────
@@ -645,21 +785,62 @@ echo "  Install dir : $INSTALL_DIR"
 echo "  Venv        : $VENV_DIR"
 echo "  Log         : $LOG_FILE"
 echo ""
-echo -e "${BOLD}Run the miner:${NC}"
+echo -e "${BOLD}Run the miner — manual / foreground:${NC}"
 echo ""
-echo "  cd $INSTALL_DIR"
-echo "  source .venv/bin/activate"
-echo "  python miner.py"
+echo "  $INSTALL_DIR/run-miner.sh"
 echo ""
-echo -e "${BOLD}Or run in background (screen):${NC}"
-echo ""
-echo "  screen -dmS miner bash -c 'cd $INSTALL_DIR && source .venv/bin/activate && python miner.py'"
-echo "  screen -r miner    # to attach"
-echo ""
-if systemctl list-unit-files 2>/dev/null | grep -q '^hash256-miner.service'; then
-    echo -e "${BOLD}Or via systemd:${NC}"
-    echo ""
-    echo "  sudo systemctl start hash256-miner"
-    echo "  sudo journalctl -fu hash256-miner"
-    echo ""
-fi
+
+case "${SUPERVISOR_CHOSEN:-manual}" in
+    screen)
+        echo -e "${BOLD}You chose: screen — start it with:${NC}"
+        echo ""
+        echo "  screen -dmS miner $INSTALL_DIR/run-miner.sh"
+        echo "  screen -r miner            # attach later"
+        echo "  Ctrl+A then D              # detach without stopping"
+        echo ""
+        ;;
+    tmux)
+        echo -e "${BOLD}You chose: tmux — start it with:${NC}"
+        echo ""
+        echo "  tmux new -d -s miner '$INSTALL_DIR/run-miner.sh'"
+        echo "  tmux attach -t miner       # attach later"
+        echo "  Ctrl+B then D              # detach without stopping"
+        echo ""
+        ;;
+    cron)
+        echo -e "${BOLD}You chose: cron @reboot — already installed.${NC}"
+        echo ""
+        echo "  Start now : $INSTALL_DIR/run-miner.sh &"
+        echo "  Auto-start: it will run automatically after every reboot"
+        echo "  Logs      : $INSTALL_DIR/miner.log + $INSTALL_DIR/miner.cron.log"
+        echo "  Verify    : crontab -l | grep hash256"
+        echo ""
+        ;;
+    pm2)
+        echo -e "${BOLD}You chose: PM2 — already running.${NC}"
+        echo ""
+        echo "  Status : pm2 status"
+        echo "  Logs   : pm2 logs hash256-miner"
+        echo "  Stop   : pm2 stop  hash256-miner"
+        echo "  Restart: pm2 restart hash256-miner"
+        echo ""
+        ;;
+    systemd)
+        echo -e "${BOLD}You chose: systemd — service installed (not started yet).${NC}"
+        echo ""
+        echo "  sudo systemctl start hash256-miner"
+        echo "  sudo journalctl -fu hash256-miner"
+        echo ""
+        ;;
+    manual|*)
+        echo -e "${BOLD}Background runner: not configured.${NC}"
+        echo ""
+        echo "  Easy options without editing system files:"
+        echo "    screen -dmS miner $INSTALL_DIR/run-miner.sh"
+        echo "    tmux   new -d -s miner '$INSTALL_DIR/run-miner.sh'"
+        echo "    pm2    start $INSTALL_DIR/ecosystem.config.js"
+        echo ""
+        echo "  Re-run 'bash setup.sh' to add a supervisor later."
+        echo ""
+        ;;
+esac
